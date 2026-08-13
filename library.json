@@ -1,0 +1,20 @@
+{
+  "helicopters": [
+    {
+      "id": "blackbird",
+      "name": "Blackbird",
+      "locations": [
+        {
+          "id": "kozlovka",
+          "name": "kozlovka",
+          "heliports": [
+            {
+              "id": "front_gate",
+              "name": "front-gate"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
