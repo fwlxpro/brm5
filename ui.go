@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"image/color"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -23,6 +26,8 @@ const (
 	screenManage
 	screenInput
 	screenConfirm
+	screenRecBrowser
+	screenRecDetail
 )
 
 type flowMode int
@@ -43,7 +48,17 @@ const (
 	manageDelHeli
 	manageDelLoc
 	manageDelHP
+	manageDelRecording
 )
+
+type recEntry struct {
+	Path     string
+	HeliName string
+	LocName  string
+	HpName   string
+}
+
+const recDetailVisible = 15
 
 var (
 	breadcrumbStyle = lipgloss.NewStyle().
@@ -252,6 +267,11 @@ type model struct {
 	manageMode manageMode
 	inputLabel string
 	inputValue string
+
+	recBrowser      []recEntry
+	recDetailEvents []Event
+	recDetailOffset int
+	recDetailPath   string
 }
 
 func newModel() model {
@@ -276,6 +296,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		if m.screen == screenRecordingLive || m.screen == screenCountdown {
 			break
+		}
+
+		if m.screen == screenRecDetail {
+			return m.handleRecDetailKey(msg)
 		}
 
 		switch m.screen {
@@ -387,10 +411,41 @@ func (m model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		return m.doDelete()
 	case "esc", "q":
+		if m.manageMode == manageDelRecording {
+			m.manageMode = manageNone
+			m.screen = screenRecDetail
+			m.cursor = m.selRecording
+			return m, nil
+		}
 		m.manageMode = manageNone
 		m.screen = screenManage
 		m.cursor = 0
 		return m, nil
+	}
+	return m, nil
+}
+
+func (m model) handleRecDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if m.recDetailOffset > 0 {
+			m.recDetailOffset--
+		}
+	case "down", "j":
+		maxOffset := len(m.recDetailEvents) - recDetailVisible
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		if m.recDetailOffset < maxOffset {
+			m.recDetailOffset++
+		}
+	case "d", "delete":
+		m.manageMode = manageDelRecording
+		m.screen = screenConfirm
+	case "esc", "q":
+		return m.goBack()
 	}
 	return m, nil
 }
@@ -450,6 +505,26 @@ func (m model) doDelete() (tea.Model, tea.Cmd) {
 		heli := &m.lib.Helicopters[m.selHeli]
 		loc := &heli.Locations[m.selLocation]
 		loc.Heliports = append(loc.Heliports[:m.selHeliport], loc.Heliports[m.selHeliport+1:]...)
+	case manageDelRecording:
+		if err := os.Remove(m.recDetailPath); err != nil {
+			m.errMsg = err.Error()
+			m.manageMode = manageNone
+			m.screen = screenRecDetail
+			return m, nil
+		}
+		m.status = "Nahrávka smazána"
+		m.errMsg = ""
+		m.manageMode = manageNone
+		m.recBrowser = m.buildRecBrowser()
+		if m.selRecording >= len(m.recBrowser) {
+			m.selRecording = len(m.recBrowser) - 1
+		}
+		if m.selRecording < 0 {
+			m.selRecording = 0
+		}
+		m.screen = screenRecBrowser
+		m.cursor = m.selRecording
+		return m, nil
 	}
 
 	if err := SaveLibrary(m.lib); err != nil {
@@ -494,9 +569,17 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 			m.screen = screenHeli
 			m.cursor = 0
 		case 2:
-			m.screen = screenManage
+			m.recBrowser = m.buildRecBrowser()
+			m.heliName = ""
+			m.locName = ""
+			m.heliportName = ""
+			m.errMsg = ""
+			m.screen = screenRecBrowser
 			m.cursor = 0
 		case 3:
+			m.screen = screenManage
+			m.cursor = 0
+		case 4:
 			return m, tea.Quit
 		}
 
@@ -633,6 +716,28 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 		m.screen = screenCountdown
 		m.countdown = 3
 		return m, tickCountdown(3)
+
+	case screenRecBrowser:
+		if len(m.recBrowser) == 0 {
+			m.errMsg = "Žádné nahrávky"
+			return m, nil
+		}
+		entry := m.recBrowser[m.cursor]
+		m.selRecording = m.cursor
+		m.recDetailPath = entry.Path
+		m.heliName = entry.HeliName
+		m.locName = entry.LocName
+		m.heliportName = entry.HpName
+
+		rec, err := LoadRecording(entry.Path)
+		if err != nil {
+			m.errMsg = err.Error()
+			return m, nil
+		}
+		m.recDetailEvents = rec.Events
+		m.recDetailOffset = 0
+		m.errMsg = ""
+		m.screen = screenRecDetail
 	}
 
 	return m, nil
@@ -671,6 +776,13 @@ func (m model) goBack() (tea.Model, tea.Cmd) {
 	case screenRecordingPick:
 		m.screen = screenHeliport
 		m.cursor = m.selHeliport
+	case screenRecBrowser:
+		m.screen = screenMain
+		m.cursor = 0
+		m.flow = flowNone
+	case screenRecDetail:
+		m.screen = screenRecBrowser
+		m.cursor = m.selRecording
 	case screenInput:
 		m.screen = screenManage
 		m.cursor = 0
@@ -685,6 +797,9 @@ func (m model) goBack() (tea.Model, tea.Cmd) {
 		case manageDelHP:
 			m.screen = screenLocation
 			m.cursor = m.selLocation
+		case manageDelRecording:
+			m.screen = screenRecDetail
+			m.cursor = m.selRecording
 		default:
 			m.screen = screenManage
 		}
@@ -756,7 +871,7 @@ func runPlaybackCmd(path string) tea.Cmd {
 func (m model) listLen() int {
 	switch m.screen {
 	case screenMain:
-		return 4
+		return 5
 	case screenManage:
 		return 6
 	case screenHeli:
@@ -777,6 +892,8 @@ func (m model) listLen() int {
 		return len(heli.Locations[m.selLocation].Heliports)
 	case screenRecordingPick:
 		return len(m.recordings)
+	case screenRecBrowser:
+		return len(m.recBrowser)
 	default:
 		return 0
 	}
@@ -785,7 +902,7 @@ func (m model) listLen() int {
 func (m model) currentItems() []string {
 	switch m.screen {
 	case screenMain:
-		return []string{"Recording", "Playback", "Knihovna", "Exit"}
+		return []string{"Recording", "Playback", "Browse Recordings", "Knihovna", "Exit"}
 	case screenManage:
 		return []string{
 			"Přidat helikoptéru",
@@ -822,9 +939,99 @@ func (m model) currentItems() []string {
 			items[i] = recordingDisplayName(p)
 		}
 		return items
+	case screenRecBrowser:
+		items := make([]string, len(m.recBrowser))
+		for i, e := range m.recBrowser {
+			items[i] = fmt.Sprintf("%s > %s > %s — %s", e.HeliName, e.LocName, e.HpName, filepath.Base(e.Path))
+		}
+		return items
 	default:
 		return nil
 	}
+}
+
+func (m model) buildRecBrowser() []recEntry {
+	var entries []recEntry
+	_ = filepath.WalkDir(libraryRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
+			return nil
+		}
+
+		rel, err := filepath.Rel(libraryRoot, path)
+		if err != nil {
+			return nil
+		}
+		parts := strings.Split(rel, string(filepath.Separator))
+
+		var heliName, locName, hpName string
+		switch {
+		case len(parts) >= 4:
+			heliName = m.resolveHeliName(parts[0])
+			locName = m.resolveLocName(parts[0], parts[1])
+			hpName = m.resolveHpName(parts[0], parts[1], parts[2])
+		case len(parts) == 3:
+			heliName = m.resolveHeliName(parts[0])
+			locName = m.resolveLocName(parts[0], parts[1])
+			hpName = parts[1]
+		case len(parts) == 2:
+			heliName = m.resolveHeliName(parts[0])
+			locName = parts[0]
+			hpName = parts[1]
+		default:
+			return nil
+		}
+
+		entries = append(entries, recEntry{
+			Path:     path,
+			HeliName: heliName,
+			LocName:  locName,
+			HpName:   hpName,
+		})
+		return nil
+	})
+	return entries
+}
+
+func (m model) resolveHeliName(id string) string {
+	for _, h := range m.lib.Helicopters {
+		if h.ID == id {
+			return h.Name
+		}
+	}
+	return id
+}
+
+func (m model) resolveLocName(heliID, locID string) string {
+	for _, h := range m.lib.Helicopters {
+		if h.ID == heliID {
+			for _, l := range h.Locations {
+				if l.ID == locID {
+					return l.Name
+				}
+			}
+		}
+	}
+	return locID
+}
+
+func (m model) resolveHpName(heliID, locID, hpID string) string {
+	for _, h := range m.lib.Helicopters {
+		if h.ID == heliID {
+			for _, l := range h.Locations {
+				if l.ID == locID {
+					for _, hp := range l.Heliports {
+						if hp.ID == hpID {
+							return hp.Name
+						}
+					}
+				}
+			}
+		}
+	}
+	return hpID
 }
 
 func (m model) breadcrumb() string {
@@ -957,6 +1164,8 @@ func (m model) confirmName() string {
 				}
 			}
 		}
+	case manageDelRecording:
+		return filepath.Base(m.recDetailPath)
 	}
 	return ""
 }
@@ -1033,6 +1242,40 @@ func (m model) View() tea.View {
 		b.WriteString(keyStyle.Render("Enter") + dimStyle.Render(" smazat  •  ") + keyStyle.Render("Esc") + dimStyle.Render(" zrušit"))
 		content = b.String()
 
+	case screenRecDetail:
+		var b strings.Builder
+		b.WriteString(neonBox(renderRainbowTitle()))
+		b.WriteString("\n\n")
+		b.WriteString(selectedStyle.Render("Prohlížeč nahrávek"))
+		b.WriteString("\n\n")
+		if bc := m.breadcrumb(); bc != "" {
+			b.WriteString(bc)
+			b.WriteString("\n")
+		}
+		b.WriteString(dimStyle.Render(filepath.Base(m.recDetailPath)))
+		b.WriteString("\n\n")
+		if len(m.recDetailEvents) == 0 {
+			b.WriteString(dimStyle.Render("  (žádné eventy)\n"))
+		} else {
+			total := m.recDetailEvents[len(m.recDetailEvents)-1].At
+			b.WriteString(dimStyle.Render(fmt.Sprintf("Délka letu: %.2f s\n", float64(total)/1000)))
+		}
+		b.WriteString("\n")
+		start := m.recDetailOffset
+		end := start + recDetailVisible
+		if end > len(m.recDetailEvents) {
+			end = len(m.recDetailEvents)
+		}
+		for _, ev := range m.recDetailEvents[start:end] {
+			b.WriteString(fmt.Sprintf("  [%4d ms] %s %s\n", ev.At, keyStyle.Render(ev.Key), dimStyle.Render(ev.Type)))
+		}
+		if end < len(m.recDetailEvents) {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("\n  … a %d dalších eventů\n", len(m.recDetailEvents)-end)))
+		}
+		b.WriteString("\n")
+		b.WriteString(keyStyle.Render("↑/↓") + dimStyle.Render(" scroll  •  ") + keyStyle.Render("d") + dimStyle.Render(" smazat  •  ") + keyStyle.Render("Esc") + dimStyle.Render(" zpět"))
+		content = b.String()
+
 	default:
 		title := ""
 		switch m.screen {
@@ -1048,6 +1291,8 @@ func (m model) View() tea.View {
 			title = "Vyber heliport"
 		case screenRecordingPick:
 			title = "Vyber nahrávku"
+		case screenRecBrowser:
+			title = "Prohlížeč nahrávek"
 		}
 		content = m.renderMenu(title, m.currentItems())
 	}
