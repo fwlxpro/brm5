@@ -942,12 +942,22 @@ func (m model) currentItems() []string {
 	case screenRecBrowser:
 		items := make([]string, len(m.recBrowser))
 		for i, e := range m.recBrowser {
-			items[i] = fmt.Sprintf("%s > %s > %s — %s", e.HeliName, e.LocName, e.HpName, filepath.Base(e.Path))
+			items[i] = fmt.Sprintf("%s — %s", recordingLabel(e), filepath.Base(e.Path))
 		}
 		return items
 	default:
 		return nil
 	}
+}
+
+func recordingLabel(e recEntry) string {
+	var parts []string
+	for _, s := range []string{e.HeliName, e.LocName, e.HpName} {
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, " > ")
 }
 
 func (m model) buildRecBrowser() []recEntry {
@@ -957,6 +967,9 @@ func (m model) buildRecBrowser() []recEntry {
 			return nil
 		}
 		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
+			return nil
+		}
+		if !strings.HasPrefix(d.Name(), "flight_") {
 			return nil
 		}
 
@@ -975,7 +988,6 @@ func (m model) buildRecBrowser() []recEntry {
 		case len(parts) == 3:
 			heliName = m.resolveHeliName(parts[0])
 			locName = m.resolveLocName(parts[0], parts[1])
-			hpName = parts[1]
 		case len(parts) == 2:
 			heliName = m.resolveHeliName(parts[0])
 			locName = parts[0]
@@ -1054,14 +1066,14 @@ func (m model) breadcrumb() string {
 func (m model) renderHeader() string {
 	title := neonBox(renderRainbowTitle())
 	github := lipgloss.PlaceHorizontal(boxWidth, lipgloss.Center, githubStyle.Render("github: flwxpro"))
-	version := lipgloss.PlaceHorizontal(boxWidth, lipgloss.Center, versionStyle.Render("verze 1.0.0 · první verze"))
+	verText := lipgloss.PlaceHorizontal(boxWidth, lipgloss.Center, versionStyle.Render(fmt.Sprintf("verze %s · první verze", version)))
 
 	var b strings.Builder
 	b.WriteString(title)
 	b.WriteString("\n\n")
 	b.WriteString(github)
 	b.WriteString("\n")
-	b.WriteString(version)
+	b.WriteString(verText)
 	b.WriteString("\n\n")
 	b.WriteString(gradientDivider(boxWidth))
 	return b.String()

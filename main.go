@@ -19,6 +19,8 @@ var ascii = `
 
 // blackhawk rescue mission 5 pilot
 
+var version = "1.0.0"
+
 var titleStyle = lipgloss.NewStyle().
 	Bold(true).
 	Foreground(lipgloss.Color("205"))

@@ -1,0 +1,91 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, goos: windows, goarch: amd64, name: windows-amd64, ext: ".exe" }
+          - { os: ubuntu-latest,  goos: linux,   goarch: amd64, name: linux-amd64,   ext: "" }
+          - { os: macos-latest,   goos: darwin,  goarch: arm64, name: mac-arm64,     ext: "" }
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: "1"
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: MSYS2 gcc (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc
+
+      - name: Linux cgo deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libc6-dev libx11-dev libx11-xcb-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxdamage-dev libxrandr-dev \
+            libxtst-dev libxinerama-dev libxdo-dev
+
+      - name: Build
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "brm5${{ matrix.ext }}"
+
+      - name: Stage
+        shell: bash
+        run: |
+          mkdir -p stage
+          cp "brm5${{ matrix.ext }}" library.json readme.md stage/
+          cp -r library stage/
+          cp -r LICENSE stage/
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path stage/* -DestinationPath "brm5-${{ matrix.name }}.zip"
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: tar -C stage -czf "brm5-${{ matrix.name }}.tar.gz" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: brm5-${{ matrix.name }}
+          path: "brm5-${{ matrix.name }}.*"
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/*
+          generate_release_notes: true
