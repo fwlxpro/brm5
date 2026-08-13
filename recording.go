@@ -84,24 +84,49 @@ func recording(savePath string, eventCh chan<- Event) error {
 	recorder := Recorder{}
 	start := time.Now()
 	var mu sync.Mutex
+	pressed := make(map[string]bool)
+	stopped := false
+
+	record := func(displayKey, eventType string) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if stopped {
+			return
+		}
+
+		// Filtruj auto-repeat: DOWN ukládej jen při přechodu nahoru->dolu,
+		// UP jen při přechodu dolu->nahoru.
+		if eventType == "DOWN" {
+			if pressed[displayKey] {
+				return
+			}
+			pressed[displayKey] = true
+		} else {
+			if !pressed[displayKey] {
+				return
+			}
+			delete(pressed, displayKey)
+		}
+
+		event := Event{
+			Key:  displayKey,
+			Type: eventType,
+			At:   time.Since(start).Milliseconds(),
+		}
+		recorder.Events = append(recorder.Events, event)
+
+		if eventCh != nil {
+			select {
+			case eventCh <- event:
+			default:
+			}
+		}
+	}
 
 	registerKey := func(hookKey, displayKey, eventType string) {
 		hook.Register(eventTypeToHook(eventType), []string{hookKey}, func(e hook.Event) {
-			event := Event{
-				Key:  displayKey,
-				Type: eventType,
-				At:   time.Since(start).Milliseconds(),
-			}
-			mu.Lock()
-			recorder.Events = append(recorder.Events, event)
-			mu.Unlock()
-
-			if eventCh != nil {
-				select {
-				case eventCh <- event:
-				default:
-				}
-			}
+			record(displayKey, eventType)
 		})
 	}
 
@@ -126,6 +151,23 @@ func recording(savePath string, eventCh chan<- Event) error {
 
 	<-stop
 	hook.End()
+
+	// Doplň UP eventy pro klávesy, které byly v momentě zastavení stále stisknuté,
+	// aby playback nikdy neskončil se zaseknutou klávesou.
+	mu.Lock()
+	stopped = true
+	at := time.Since(start).Milliseconds()
+	for key := range pressed {
+		event := Event{Key: key, Type: "UP", At: at}
+		recorder.Events = append(recorder.Events, event)
+		if eventCh != nil {
+			select {
+			case eventCh <- event:
+			default:
+			}
+		}
+	}
+	mu.Unlock()
 
 	dir := filepath.Dir(savePath)
 	if err := EnsureDir(dir); err != nil {
