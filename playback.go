@@ -28,6 +28,15 @@ func playback(rec Recorder) error {
 		return fmt.Errorf("prázdný záznam")
 	}
 
+	// Seřízni úvodní mrtvý čas (vzniklý přepínáním do hry při nahrávání):
+	// při playbacku už uživatel v kokpitu je, čekání je zbytečné a matoucí.
+	first := rec.Events[0].At
+	if first > 0 {
+		for i := range rec.Events {
+			rec.Events[i].At -= first
+		}
+	}
+
 	restore := beginHighResTimer()
 	defer restore()
 
