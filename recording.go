@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -17,8 +16,8 @@ var flightKeys = map[string]string{
 	"d":     "D",
 	"shift": "Shift",
 	"space": "Space",
-        "e":     "E",
-        "q":     "Q",
+	"e":     "E",
+	"q":     "Q",
 }
 
 // --- Původní logika (zakomentováno) ---
@@ -87,7 +86,20 @@ func recording(savePath string, eventCh chan<- Event) error {
 	pressed := make(map[string]bool)
 	stopped := false
 
-	record := func(displayKey, eventType string) {
+	// Čteme surový kanál z hook.Start() přímo — gohookův Process/Register
+	// má bug: při prvním uvolnění klávesy vynuluje celý stav a UPs dalších
+	// kláves pak nevyvolá (případně je přiřadí špatné klávese), čímž by
+	// nahrávka obsahovala klávesu "stisknutou" až do konce a playback by
+	// vrtulník převracel do země.
+	keyByCode := make(map[uint16]string)
+	for hookName, displayName := range flightKeys {
+		if code, ok := hook.Keycode[hookName]; ok {
+			keyByCode[code] = displayName
+		}
+	}
+	stopCode := hook.Keycode["o"]
+
+	record := func(when time.Time, displayKey, eventType string) {
 		mu.Lock()
 		defer mu.Unlock()
 
@@ -95,24 +107,32 @@ func recording(savePath string, eventCh chan<- Event) error {
 			return
 		}
 
-		// Filtruj auto-repeat: DOWN ukládej jen při přechodu nahoru->dolu,
-		// UP jen při přechodu dolu->nahoru.
+		// Filtruj auto-repeat: DOWN ukládej jen při přechodu nahoru->dolu.
 		if eventType == "DOWN" {
 			if pressed[displayKey] {
 				return
 			}
 			pressed[displayKey] = true
 		} else {
-			if !pressed[displayKey] {
-				return
-			}
+			// UP nikdy nezahazuj — kdyby se ztratil odpovídající DOWN
+			// (např. klávesa držená už před startem nahrávky), klávesa by
+			// v záznamu zůstala "stisknutá" a playback by ji držel celou dobu,
+			// což vrtulník neovladatelně převrací.
+			// delete udrží v mapě jen klávesy skutečně držené (viz doplnění
+			// UP na konci) — klávesa s false by dostala falešný UP.
 			delete(pressed, displayKey)
 		}
 
+		// At vychází z času, kdy OS událost odbavil (e.When), ne z času,
+		// kdy náš callback stihl proběhnout — to je přesnější.
+		at := when.Sub(start).Milliseconds()
+		if at < 0 {
+			at = 0
+		}
 		event := Event{
 			Key:  displayKey,
 			Type: eventType,
-			At:   time.Since(start).Milliseconds(),
+			At:   at,
 		}
 		recorder.Events = append(recorder.Events, event)
 
@@ -124,40 +144,58 @@ func recording(savePath string, eventCh chan<- Event) error {
 		}
 	}
 
-	registerKey := func(hookKey, displayKey, eventType string) {
-		hook.Register(eventTypeToHook(eventType), []string{hookKey}, func(e hook.Event) {
-			record(displayKey, eventType)
-		})
-	}
-
-	for hookKey, displayKey := range flightKeys {
-		registerKey(hookKey, displayKey, "DOWN")
-		registerKey(hookKey, displayKey, "UP")
-	}
-
 	stop := make(chan struct{})
-	hook.Register(hook.KeyDown, []string{"o"}, func(e hook.Event) {
-		select {
-		case <-stop:
-		default:
-			close(stop)
-		}
-	})
-
-	s := hook.Start()
+	// Start(tm) určuje periodu pollingu C bufferu. Výchozí 50 ms kvantuje
+	// časové značky na ~50 ms kroky a sub-50ms ťuky úplně slévá — s 2 ms
+	// zůstává nahrávka věrná v řádu milisekund.
+	s := hook.Start(2)
+	done := make(chan struct{})
 	go func() {
-		<-hook.Process(s)
+		defer close(done)
+		for e := range s {
+			mu.Lock()
+			stoppedNow := stopped
+			mu.Unlock()
+			if stoppedNow {
+				return
+			}
+
+			switch e.Kind {
+			case hook.KeyDown, hook.KeyHold:
+				if name, ok := keyByCode[e.Keycode]; ok {
+					record(e.When, name, "DOWN")
+				} else if e.Keycode == stopCode {
+					select {
+					case <-stop:
+					default:
+						close(stop)
+					}
+				}
+			case hook.KeyUp:
+				if name, ok := keyByCode[e.Keycode]; ok {
+					record(e.When, name, "UP")
+				}
+			}
+		}
 	}()
 
 	<-stop
+	mu.Lock()
+	stopped = true
+	mu.Unlock()
 	hook.End()
+	<-done
 
 	// Doplň UP eventy pro klávesy, které byly v momentě zastavení stále stisknuté,
 	// aby playback nikdy neskončil se zaseknutou klávesou.
 	mu.Lock()
-	stopped = true
-	at := time.Since(start).Milliseconds()
+	heldKeys := make([]string, 0, len(pressed))
 	for key := range pressed {
+		heldKeys = append(heldKeys, key)
+	}
+	mu.Unlock()
+	at := time.Since(start).Milliseconds()
+	for _, key := range heldKeys {
 		event := Event{Key: key, Type: "UP", At: at}
 		recorder.Events = append(recorder.Events, event)
 		if eventCh != nil {
@@ -167,7 +205,6 @@ func recording(savePath string, eventCh chan<- Event) error {
 			}
 		}
 	}
-	mu.Unlock()
 
 	dir := filepath.Dir(savePath)
 	if err := EnsureDir(dir); err != nil {
@@ -177,11 +214,4 @@ func recording(savePath string, eventCh chan<- Event) error {
 		return fmt.Errorf("uložení nahrávky: %w", err)
 	}
 	return nil
-}
-
-func eventTypeToHook(eventType string) uint8 {
-	if strings.ToUpper(eventType) == "UP" {
-		return hook.KeyUp
-	}
-	return hook.KeyDown
 }

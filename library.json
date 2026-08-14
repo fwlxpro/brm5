@@ -2,15 +2,45 @@
   "helicopters": [
     {
       "id": "blackbird",
-      "name": "Blackbird",
+      "name": "BlackBird",
       "locations": [
         {
           "id": "kozlovka",
-          "name": "kozlovka",
+          "name": "Kozlovka",
           "heliports": [
             {
-              "id": "front_gate",
-              "name": "front-gate"
+              "id": "frontgate",
+              "name": "FrontGate"
+            },
+            {
+              "id": "beach",
+              "name": "beach"
+            }
+          ]
+        },
+        {
+          "id": "headquaters",
+          "name": "headquaters",
+          "heliports": [
+            {
+              "id": "beach",
+              "name": "beach"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "test",
+      "name": "test",
+      "locations": [
+        {
+          "id": "test",
+          "name": "test",
+          "heliports": [
+            {
+              "id": "test1",
+              "name": "test1"
             }
           ]
         }

@@ -17,13 +17,19 @@ var robotKeyMap = map[string]string{
 	"Shift": "shift",
 	"Space": "space",
 	"Ctrl":  "ctrl",
+	"E":     "e",
+	"Q":     "q",
 }
 
 // playback přehraje eventy podle jejich časových údajů At (ms od startu nahrávky).
 func playback(rec Recorder) error {
+	rec.Events = normalizeEvents(rec.Events)
 	if len(rec.Events) == 0 {
 		return fmt.Errorf("prázdný záznam")
 	}
+
+	restore := beginHighResTimer()
+	defer restore()
 
 	held := make(map[string]bool)
 	start := time.Now()
@@ -31,7 +37,7 @@ func playback(rec Recorder) error {
 	for _, ev := range rec.Events {
 		target := time.Duration(ev.At) * time.Millisecond
 		if wait := target - time.Since(start); wait > 0 {
-			time.Sleep(wait)
+			preciseSleep(wait)
 		}
 
 		if err := applyKey(ev, held); err != nil {
@@ -42,6 +48,55 @@ func playback(rec Recorder) error {
 
 	releaseAllKeys(held)
 	return nil
+}
+
+// preciseSleep čeká přesněji než samotný time.Sleep (Windows má běžně
+// rozlišení ~15 ms, čímž by se prodloužily všechny držení kláves a vrtulník
+// by dostával jiný input, než byl nahrán). Hrubou část přeskočíme Sleepem
+// a posledních pár ms dočekáme aktivním čekáním.
+func preciseSleep(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	const margin = 2 * time.Millisecond
+	end := time.Now().Add(d)
+	if d > margin {
+		time.Sleep(d - margin)
+	}
+	for time.Now().Before(end) {
+	}
+}
+
+// normalizeEvents opraví starší/rozbité nahrávky: zahodí duplicitní DOWN
+// (auto-repeat) a osamocené UP a ke každému DOWNu bez UP doplní na konci
+// uvolnění, aby playback nikdy nedržel klávesu celou dobu.
+func normalizeEvents(events []Event) []Event {
+	held := make(map[string]bool)
+	lastAt := int64(0)
+	out := make([]Event, 0, len(events))
+	for _, ev := range events {
+		if ev.At > lastAt {
+			lastAt = ev.At
+		}
+		switch ev.Type {
+		case "DOWN":
+			if held[ev.Key] {
+				continue
+			}
+			held[ev.Key] = true
+			out = append(out, ev)
+		case "UP":
+			if !held[ev.Key] {
+				continue
+			}
+			held[ev.Key] = false
+			out = append(out, ev)
+		}
+	}
+	for key := range held {
+		out = append(out, Event{Key: key, Type: "UP", At: lastAt})
+	}
+	return out
 }
 
 func applyKey(ev Event, held map[string]bool) error {
